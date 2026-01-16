@@ -7,6 +7,9 @@
     "apps/*",
     "packages/*"
   ],
+  "overrides": {
+    "next": "^14.2.35"
+  },
   "scripts": {
     "dev": "turbo run dev",
     "build": "turbo run build",
