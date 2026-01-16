@@ -10,6 +10,12 @@
   "overrides": {
     "next": "^14.2.35"
   },
+  "optionalDependencies": {
+    "lightningcss-linux-x64-gnu": "1.30.2",
+    "lightningcss-linux-x64-musl": "1.30.2",
+    "lightningcss-linux-arm64-gnu": "1.30.2",
+    "lightningcss-linux-arm64-musl": "1.30.2"
+  },
   "scripts": {
     "dev": "turbo run dev",
     "build": "turbo run build",
