@@ -1,16 +1,16 @@
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { PrismaClient } from '@prisma/client';
 
 @Injectable()
 export class PrismaService extends PrismaClient implements OnModuleInit, OnModuleDestroy {
-    constructor() {
-        // 🚨 FIX: On force l'URL explicitement ici
-        const url = process.env.DATABASE_URL;
+    constructor(config: ConfigService) {
+        const url = config.get<string>('DATABASE_URL');
 
         if (!url) {
-            console.error('❌ ERREUR CRITIQUE: La variable DATABASE_URL est absente !');
+            console.error('❌ ERREUR: DATABASE_URL introuvable via ConfigService');
         } else {
-            console.log('✅ DATABASE_URL trouvée (Lancement de Prisma)');
+            console.log('✅ DATABASE_URL trouvée via ConfigService');
         }
 
         super({
