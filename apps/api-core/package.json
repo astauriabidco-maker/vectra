@@ -3,10 +3,14 @@
     "version": "1.0.0",
     "private": true,
     "scripts": {
-        "dev": "PORT=7070 nest start --watch",
         "build": "nest build",
-        "test": "jest",
-        "start": "ts-node src/main.ts"
+        "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
+        "start": "node dist/main",
+        "start:dev": "nest start --watch",
+        "start:debug": "nest start --debug --watch",
+        "start:prod": "node dist/main",
+        "lint": "eslint \"{src,apps,libs,test}/**/*.ts\" --fix",
+        "test": "jest"
     },
     "dependencies": {
         "@nestjs/common": "^10.0.0",
