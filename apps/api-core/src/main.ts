@@ -16,7 +16,7 @@ async function bootstrap() {
     });
 
     const port = process.env.PORT || 7070;
-    await app.listen(port);
+    await app.listen(port, '0.0.0.0');
     console.log(`🚀 Vectra Backend running on port ${port}`);
 }
 bootstrap();
