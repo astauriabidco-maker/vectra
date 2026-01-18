@@ -1,0 +1,14 @@
+# Nixpacks configuration for Railway deployment
+# This overrides Railpack's auto-detected commands
+
+[phases.setup]
+nixPkgs = ["nodejs_22"]
+
+[phases.install]
+cmds = ["npm i -g corepack@latest && corepack enable && yarn install --frozen-lockfile"]
+
+[phases.build]
+cmds = ["cd apps/api-core && yarn run build"]
+
+[start]
+cmd = "node apps/api-core/dist/main.js"
