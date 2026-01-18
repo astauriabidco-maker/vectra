@@ -146,7 +146,9 @@ export default function CustomersPage() {
                                             )}
                                             {customer.workspace && (
                                                 <span className="text-[10px] text-gray-500 flex items-center gap-1 mt-0.5">
-                                                    🏢 {customer.workspace.name}
+                                                    <span className="font-semibold text-gray-700">{customer.workspace.tenantOrg?.name}</span>
+                                                    <span className="text-gray-300">•</span>
+                                                    <span>{customer.workspace.name}</span>
                                                 </span>
                                             )}
                                         </div>

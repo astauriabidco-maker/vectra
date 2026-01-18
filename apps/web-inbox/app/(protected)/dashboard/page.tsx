@@ -15,7 +15,9 @@ export default async function DashboardPage({
     const conversations = await prisma.conversation.findMany({
         include: {
             contact: true,
-            workspace: true,
+            workspace: {
+                include: { tenantOrg: true }
+            },
         },
         orderBy: {
             updatedAt: 'desc',
@@ -86,8 +88,10 @@ export default async function DashboardPage({
                                                 </p>
                                                 {conv.workspace && (
                                                     <div className="mt-1 flex items-center gap-1">
-                                                        <span className="text-[10px] bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded flex items-center gap-0.5 border border-gray-200">
-                                                            🏢 {conv.workspace.name}
+                                                        <span className="text-[10px] bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded flex items-center gap-1 border border-gray-200">
+                                                            <span className="font-semibold text-gray-800">{(conv.workspace as any).tenantOrg?.name}</span>
+                                                            <span className="text-gray-400 opacity-70">•</span>
+                                                            <span>{conv.workspace.name}</span>
                                                         </span>
                                                     </div>
                                                 )}
@@ -117,8 +121,10 @@ export default async function DashboardPage({
                                     {(currentConversation?.contact.attributes as any)?.name}
                                 </span>
                                 {currentConversation?.workspace && (
-                                    <span className="text-xs bg-gray-100 text-gray-600 px-2 py-1 rounded border border-gray-200">
-                                        🏢 {currentConversation.workspace.name}
+                                    <span className="text-xs bg-gray-100 text-gray-600 px-2 py-1 rounded border border-gray-200 flex items-center gap-1">
+                                        <span className="font-bold text-gray-800">{currentConversation.workspace.tenantOrg?.name}</span>
+                                        <span className="text-gray-400 opacity-70">•</span>
+                                        <span>{currentConversation.workspace.name}</span>
                                     </span>
                                 )}
                             </div>

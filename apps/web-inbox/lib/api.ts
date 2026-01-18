@@ -14,6 +14,10 @@ export interface Customer {
     workspace?: {
         id: string;
         name: string;
+        tenantOrg?: {
+            id: string;
+            name: string;
+        };
     };
 }
 
