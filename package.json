@@ -14,7 +14,9 @@
   "scripts": {
     "dev": "turbo run dev",
     "build": "turbo run build",
-    "test": "turbo run test"
+    "build:api-core": "turbo run build --filter=api-core",
+    "test": "turbo run test",
+    "nx": "turbo"
   },
   "devDependencies": {
     "turbo": "latest"
