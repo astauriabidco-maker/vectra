@@ -61,16 +61,23 @@ export class IntegrationsService {
     }
 
     /**
-     * Save or update an integration
+     * Save or update an integration for a specific workspace
      */
-    async saveIntegration(provider: string, data: { enabled?: boolean; credentials?: IntegrationCredentials }) {
+    async saveIntegration(
+        workspaceId: string,
+        provider: string,
+        data: { enabled?: boolean; credentials?: IntegrationCredentials }
+    ) {
         const encryptedCredentials = data.credentials
             ? this.encryptCredentials(data.credentials)
             : undefined;
 
         const integration = await this.prisma.integration.upsert({
-            where: { provider },
+            where: {
+                workspaceId_provider: { workspaceId, provider }
+            },
             create: {
+                workspaceId,
                 provider,
                 enabled: data.enabled ?? false,
                 credentials: encryptedCredentials ?? {},
@@ -90,9 +97,14 @@ export class IntegrationsService {
     /**
      * Get an integration with decrypted credentials (for internal use)
      */
-    async getIntegration(provider: string): Promise<{ enabled: boolean; credentials: IntegrationCredentials } | null> {
+    async getIntegration(
+        workspaceId: string,
+        provider: string
+    ): Promise<{ enabled: boolean; credentials: IntegrationCredentials } | null> {
         const integration = await this.prisma.integration.findUnique({
-            where: { provider },
+            where: {
+                workspaceId_provider: { workspaceId, provider }
+            },
         });
 
         if (!integration) {
@@ -108,13 +120,15 @@ export class IntegrationsService {
     /**
      * Get an integration with masked credentials (for API response)
      */
-    async getIntegrationMasked(provider: string) {
+    async getIntegrationMasked(workspaceId: string, provider: string) {
         const integration = await this.prisma.integration.findUnique({
-            where: { provider },
+            where: {
+                workspaceId_provider: { workspaceId, provider }
+            },
         });
 
         if (!integration) {
-            throw new NotFoundException(`Integration ${provider} not found`);
+            throw new NotFoundException(`Integration ${provider} not found for workspace`);
         }
 
         return {
@@ -124,10 +138,11 @@ export class IntegrationsService {
     }
 
     /**
-     * List all integrations with masked credentials
+     * List all integrations for a workspace with masked credentials
      */
-    async getAllIntegrations() {
+    async getAllIntegrations(workspaceId: string) {
         const integrations = await this.prisma.integration.findMany({
+            where: { workspaceId },
             orderBy: { provider: 'asc' },
         });
 
@@ -138,24 +153,26 @@ export class IntegrationsService {
     }
 
     /**
-     * Get Twilio credentials (with fallback to env vars)
+     * Get Twilio credentials for a workspace (with fallback to env vars)
      */
-    async getTwilioCredentials(): Promise<{
+    async getTwilioCredentials(workspaceId?: string): Promise<{
         accountSid: string;
         authToken: string;
         phoneNumber: string;
     }> {
-        const integration = await this.getIntegration('twilio');
+        if (workspaceId) {
+            const integration = await this.getIntegration(workspaceId, 'twilio');
 
-        if (integration?.enabled && integration.credentials.accountSid) {
-            return {
-                accountSid: integration.credentials.accountSid,
-                authToken: integration.credentials.authToken || '',
-                phoneNumber: integration.credentials.phoneNumber || '',
-            };
+            if (integration?.enabled && integration.credentials.accountSid) {
+                return {
+                    accountSid: integration.credentials.accountSid,
+                    authToken: integration.credentials.authToken || '',
+                    phoneNumber: integration.credentials.phoneNumber || '',
+                };
+            }
         }
 
-        // Fallback to environment variables
+        // Fallback to environment variables (global config)
         console.log('📌 Using Twilio credentials from environment variables');
         return {
             accountSid: process.env.TWILIO_ACCOUNT_SID || '',

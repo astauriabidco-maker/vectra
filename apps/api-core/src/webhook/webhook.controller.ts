@@ -16,23 +16,60 @@ export class WebhookController {
     async handleWhatsappWebhook(@Body() payload: any) {
         console.log('Incoming Payload:', JSON.stringify(payload));
 
-        let from: string, text: string, name: string;
+        let from: string, to: string, text: string, name: string;
 
         // Detect Twilio vs JSON
         if (payload.Body) {
             // Twilio Payload
             text = payload.Body;
             from = payload.From;
+            to = payload.To;
             name = payload.ProfileName || 'Unknown';
         } else {
             // JSON Payload (Legacy/Test)
             from = payload.from;
+            to = payload.to || '';
             text = payload.text;
             name = payload.name;
         }
 
-        console.log(`Parsed Webhook: From=${from}, Text=${text}, Name=${name}`);
+        console.log(`Parsed Webhook: From=${from}, To=${to}, Text=${text}, Name=${name}`);
 
+        // =====================================================
+        // STEP 0: Resolve Workspace by Twilio Phone Number (Multi-Tenancy)
+        // =====================================================
+        const cleanToNumber = to?.replace('whatsapp:', '') || '';
+        const workspace = await this.prisma.workspace.findUnique({
+            where: { twilioPhoneNumber: cleanToNumber },
+        });
+
+        if (!workspace) {
+            console.error(`❌ No workspace found for Twilio number: ${cleanToNumber}`);
+            // Fallback: Try to find any workspace (dev mode)
+            const fallbackWorkspace = await this.prisma.workspace.findFirst();
+            if (!fallbackWorkspace) {
+                console.error('❌ No workspaces exist in database. Create one first.');
+                return { status: 'ignored', reason: 'no_workspace' };
+            }
+            console.warn(`⚠️ Using fallback workspace: ${fallbackWorkspace.name}`);
+            // Continue with fallback
+            return this.processMessage(fallbackWorkspace.id, from, text, name, payload);
+        }
+
+        console.log(`✅ Resolved Workspace: ${workspace.name} (ID: ${workspace.id})`);
+        return this.processMessage(workspace.id, from, text, name, payload);
+    }
+
+    /**
+     * Core message processing logic scoped to a workspace
+     */
+    private async processMessage(
+        workspaceId: string,
+        from: string,
+        text: string,
+        name: string,
+        payload: any
+    ) {
         // 1. Find or Create Contact by Identity
         let identity = await this.prisma.contactIdentity.findFirst({
             where: {
@@ -59,14 +96,10 @@ export class WebhookController {
                 }
             });
         } else {
-            // Create new Contact and Identity
+            // Create new Contact and Identity linked to workspace
             contact = await this.prisma.contact.create({
                 data: {
-                    organization: {
-                        create: {
-                            name: 'Default Org' // Creating default org if not exists logic is tricky here, assuming simplified approach
-                        }
-                    },
+                    workspaceId: workspaceId,
                     identities: {
                         create: {
                             type: 'WHATSAPP',
@@ -81,22 +114,25 @@ export class WebhookController {
             });
         }
 
-        // 2. Find or Create Customer by Phone (Phone-First CRM)
-        const cleanPhone = from.replace('whatsapp:', ''); // Remove WhatsApp prefix if present
-        let customer = await this.prisma.customer.findUnique({
-            where: { phone: cleanPhone },
+        // 2. Find or Create Customer by Phone (Phone-First CRM) - Scoped to Workspace
+        const cleanPhone = from.replace('whatsapp:', '');
+        let customer = await this.prisma.customer.findFirst({
+            where: {
+                workspaceId: workspaceId,
+                phone: cleanPhone,
+            },
         });
 
         if (!customer) {
-            // Create new Customer with phone as primary identifier
+            // Create new Customer linked to workspace
             customer = await this.prisma.customer.create({
                 data: {
+                    workspaceId: workspaceId,
                     phone: cleanPhone,
                     name: name !== 'Unknown' ? name : `Visitor ${cleanPhone}`,
-                    // email is optional, will be null for WhatsApp-first customers
                 },
             });
-            console.log(`✅ Created new Customer: ${customer.id} (${cleanPhone})`);
+            console.log(`✅ Created new Customer: ${customer.id} (${cleanPhone}) in Workspace ${workspaceId}`);
         } else {
             // Update name if we have a better one from WhatsApp profile
             if (name && name !== 'Unknown' && !customer.name) {
@@ -108,9 +144,10 @@ export class WebhookController {
             console.log(`✅ Found existing Customer: ${customer.id}`);
         }
 
-        // 3. Find or Create Conversation (active)
+        // 3. Find or Create Conversation (active) - Scoped to Workspace
         let conversation = await this.prisma.conversation.findFirst({
             where: {
+                workspaceId: workspaceId,
                 contactId: contact.id,
                 status: 'OPEN',
             },
@@ -119,13 +156,14 @@ export class WebhookController {
         if (!conversation) {
             conversation = await this.prisma.conversation.create({
                 data: {
+                    workspaceId: workspaceId,
                     contactId: contact.id,
                     status: 'OPEN',
                 },
             });
         }
 
-        // 3. Create Message & Update Conversation Timestamp
+        // 4. Create Message & Update Conversation Timestamp
         const [message] = await this.prisma.$transaction([
             this.prisma.message.create({
                 data: {
@@ -141,12 +179,13 @@ export class WebhookController {
             })
         ]);
 
-        // 4. Push to Redis for AI Worker (ONLY if AI is ON)
+        // 5. Push to Redis for AI Worker (ONLY if AI is ON)
         if (conversation.aiStatus === 'ON') {
             await this.redisHelper.pushJob('vectra_ai_queue', {
                 messageId: message.id,
                 contactId: contact.id,
                 conversationId: conversation.id,
+                workspaceId: workspaceId,
                 text: text,
                 userPhone: from,
             });
@@ -162,13 +201,17 @@ export class WebhookController {
             console.log(`⚠️ Skipping AI for conversation ${conversation.id} (Status: ${conversation.aiStatus})`);
         }
 
-        // 5. Publish Real-Time Event
+        // 6. Publish Real-Time Event
         const redisPub = new (require('ioredis'))({ host: 'localhost', port: 6399 });
         console.log('📢 Publishing event to vectra_events...');
-        await redisPub.publish('vectra_events', JSON.stringify({ type: 'message_received', data: message }));
+        await redisPub.publish('vectra_events', JSON.stringify({
+            type: 'message_received',
+            workspaceId: workspaceId,
+            data: message
+        }));
         redisPub.disconnect();
         console.log('✅ Event published to vectra_events');
 
-        return { status: 'received' };
+        return { status: 'received', workspaceId };
     }
 }

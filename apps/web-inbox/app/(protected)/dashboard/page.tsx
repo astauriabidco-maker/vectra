@@ -46,7 +46,7 @@ export default async function DashboardPage({
             <div className="w-80 border-r bg-muted/30 flex flex-col">
                 <div className="p-4 border-b bg-background/50 backdrop-blur-sm">
                     <h2 className="font-semibold text-lg">Conversations</h2>
-                    <p className="text-xs text-muted-foreground">{conversations.length} conversation(s)</p>
+                    <p className="text-xs text-muted-foreground" suppressHydrationWarning>{conversations.length} conversation(s)</p>
                 </div>
                 <ScrollArea className="flex-1">
                     <div className="flex flex-col p-2 gap-2">
@@ -75,7 +75,7 @@ export default async function DashboardPage({
                                                     <p className={`text-sm truncate ${isSelected ? 'font-bold' : 'font-semibold'}`}>
                                                         {contactName}
                                                     </p>
-                                                    <span className="text-[10px] text-muted-foreground">
+                                                    <span className="text-[10px] text-muted-foreground" suppressHydrationWarning>
                                                         {conv.updatedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                                                     </span>
                                                 </div>
@@ -148,7 +148,7 @@ export default async function DashboardPage({
                                                 <p className="whitespace-pre-wrap leading-relaxed">
                                                     {msg.contentText}
                                                 </p>
-                                                <p className={`text-[10px] mt-1.5 opacity-70 ${isContact ? 'text-slate-500' : 'text-blue-50'}`}>
+                                                <p className={`text-[10px] mt-1.5 opacity-70 ${isContact ? 'text-slate-500' : 'text-blue-50'}`} suppressHydrationWarning>
                                                     {new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                                                 </p>
                                             </div>

@@ -7,23 +7,53 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model Organization {
-  id        String   @id @default(uuid())
-  name      String
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+// ============================================
+// MULTI-TENANCY: Hierarchical Structure
+// ============================================
 
-  contacts Contact[]
+// HQ Level - linked to Clerk Organization
+model TenantOrg {
+  id         String   @id @default(uuid())
+  clerkOrgId String   @unique
+  name       String
+  plan       String   @default("FREE")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  workspaces Workspace[]
 }
 
-model Contact {
-  id             String   @id @default(uuid())
-  organizationId String
-  attributes     Json?    @default("{}")
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+// Agency/Branch Level - each has its own Twilio number
+model Workspace {
+  id                String   @id @default(uuid())
+  name              String   // e.g., "Agence Paris"
+  tenantOrgId       String
+  twilioPhoneNumber String?  @unique // +15551234567
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
 
-  organization  Organization    @relation(fields: [organizationId], references: [id])
+  tenantOrg TenantOrg @relation(fields: [tenantOrgId], references: [id], onDelete: Cascade)
+
+  // All resources scoped to workspace
+  contacts      Contact[]
+  customers     Customer[]
+  tickets       Ticket[]
+  conversations Conversation[]
+  integrations  Integration[]
+}
+
+// ============================================
+// CONTACTS & MESSAGING
+// ============================================
+
+model Contact {
+  id          String   @id @default(uuid())
+  workspaceId String
+  attributes  Json?    @default("{}")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  workspace     Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   identities    ContactIdentity[]
   conversations Conversation[]
 }
@@ -42,50 +72,64 @@ model ContactIdentity {
   createdAt  DateTime     @default(now())
   updatedAt  DateTime     @updatedAt
 
-  contact Contact @relation(fields: [contactId], references: [id])
+  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  @@unique([type, identifier]) // Prevent duplicate identities
 }
 
 model Conversation {
-  id         String   @id @default(uuid())
-  contactId  String
-  status     String   @default("OPEN")
-  aiStatus   String   @default("ON")
-  assigneeId String?
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  id          String   @id @default(uuid())
+  workspaceId String
+  contactId   String
+  status      String   @default("OPEN")
+  aiStatus    String   @default("ON")
+  assigneeId  String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
-  contact  Contact   @relation(fields: [contactId], references: [id])
-  messages Message[]
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  contact   Contact   @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  messages  Message[]
 }
 
 model Message {
-  id              String   @id @default(uuid())
-  conversationId  String
-  senderType      String   // USER, AGENT, SYSTEM, BOT
-  contentText     String?
-  contentPayload  Json?
-  suggestedReply  String?  // AI Copilot suggestion
-  createdAt       DateTime @default(now())
+  id             String   @id @default(uuid())
+  conversationId String
+  senderType     String   // USER, AGENT, SYSTEM, BOT
+  contentText    String?
+  contentPayload Json?
+  suggestedReply String?  // AI Copilot suggestion
+  createdAt      DateTime @default(now())
 
-  conversation Conversation @relation(fields: [conversationId], references: [id])
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
 }
 
-model Customer {
-  id        String   @id @default(cuid())
-  email     String?  @unique
-  name      String?
-  phone     String   @unique
-  company   String?
-  notes     String?  @db.Text
-  tags      String[] @default([])
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+// ============================================
+// CRM: CUSTOMERS & TICKETS
+// ============================================
 
-  tickets Ticket[]
+model Customer {
+  id          String   @id @default(cuid())
+  workspaceId String
+  email       String?
+  name        String?
+  phone       String
+  company     String?
+  notes       String?  @db.Text
+  tags        String[] @default([])
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  tickets   Ticket[]
+
+  @@unique([workspaceId, phone]) // Phone unique within workspace
+  @@unique([workspaceId, email]) // Email unique within workspace (if present)
 }
 
 model Ticket {
   id          String   @id @default(cuid())
+  workspaceId String
   title       String
   description String?  @db.Text
   status      String   @default("OPEN") // OPEN, IN_PROGRESS, RESOLVED, CLOSED
@@ -94,14 +138,24 @@ model Ticket {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  customer Customer? @relation(fields: [customerId], references: [id])
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  customer  Customer? @relation(fields: [customerId], references: [id])
 }
+
+// ============================================
+// INTEGRATIONS (per-workspace)
+// ============================================
 
 model Integration {
   id          String   @id @default(cuid())
-  provider    String   @unique // "twilio", "meta", etc.
+  workspaceId String
+  provider    String   // "twilio", "meta", etc.
   enabled     Boolean  @default(false)
   credentials Json     // Encrypted credentials
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, provider]) // One provider per workspace
 }

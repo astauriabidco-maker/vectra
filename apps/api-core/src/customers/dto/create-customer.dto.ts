@@ -2,6 +2,9 @@ import { IsEmail, IsString, IsOptional, IsArray } from 'class-validator';
 
 export class CreateCustomerDto {
     @IsString()
+    workspaceId: string;  // Required - Multi-tenancy
+
+    @IsString()
     phone: string;  // Required - Phone-First CRM
 
     @IsOptional()

@@ -40,6 +40,15 @@ const navigation = [
 export function AppSidebar() {
     const pathname = usePathname();
     const [collapsed, setCollapsed] = useState(false);
+    const [mounted, setMounted] = useState(false);
+
+    useEffect(() => {
+        setMounted(true);
+    }, []);
+
+    if (!mounted) {
+        return <div className="h-screen w-16 border-r bg-background" />; // Simplified skeleton
+    }
 
     return (
         <div className={cn(

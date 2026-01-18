@@ -12,8 +12,12 @@ export class CustomersService {
         });
     }
 
-    async findAll() {
+    /**
+     * Find all customers scoped to a specific workspace
+     */
+    async findAll(workspaceId: string) {
         return this.prisma.customer.findMany({
+            where: { workspaceId },
             orderBy: { createdAt: 'desc' },
             include: { tickets: true },
         });

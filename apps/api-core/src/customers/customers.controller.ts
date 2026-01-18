@@ -6,6 +6,7 @@ import {
     Patch,
     Param,
     Delete,
+    Query,
 } from '@nestjs/common';
 import { CustomersService } from './customers.service';
 import { CreateCustomerDto, UpdateCustomerDto } from './dto';
@@ -20,8 +21,8 @@ export class CustomersController {
     }
 
     @Get()
-    findAll() {
-        return this.customersService.findAll();
+    findAll(@Query('workspaceId') workspaceId: string) {
+        return this.customersService.findAll(workspaceId);
     }
 
     @Get(':id')

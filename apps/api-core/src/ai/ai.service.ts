@@ -33,15 +33,7 @@ export class AiService {
      */
     async generateSuggestion(conversationId: string, messageId: string): Promise<string | null> {
         try {
-            // 1. Get Google Gemini API key from integrations
-            const googleIntegration = await this.integrationsService.getIntegration('google');
-
-            if (!googleIntegration?.enabled || !googleIntegration.credentials.apiKey) {
-                console.log('⚠️ Google Gemini integration not configured or disabled');
-                return null;
-            }
-
-            // 2. Fetch conversation with last 10 messages for context
+            // 1. Fetch conversation with workspaceId first
             const conversation = await this.prisma.conversation.findUnique({
                 where: { id: conversationId },
                 include: {
@@ -59,6 +51,26 @@ export class AiService {
 
             if (!conversation || conversation.messages.length === 0) {
                 console.log('⚠️ No conversation or messages found');
+                return null;
+            }
+
+            // 2. Get Google Gemini API key from workspace integrations or env
+            let apiKey: string | undefined;
+
+            const googleIntegration = await this.integrationsService.getIntegration(
+                conversation.workspaceId,
+                'google'
+            );
+
+            if (googleIntegration?.enabled && googleIntegration.credentials.apiKey) {
+                apiKey = googleIntegration.credentials.apiKey;
+            } else {
+                // Fallback to environment variable (support both naming conventions)
+                apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+            }
+
+            if (!apiKey) {
+                console.log('⚠️ Google Gemini API key not configured');
                 return null;
             }
 
@@ -83,7 +95,7 @@ ${messagesHistory}
 Based on this conversation, provide a helpful reply:`;
 
             // 5. Call Gemini API
-            const genAI = new GoogleGenerativeAI(googleIntegration.credentials.apiKey);
+            const genAI = new GoogleGenerativeAI(apiKey);
             const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
 
             const result = await model.generateContent(fullPrompt);
