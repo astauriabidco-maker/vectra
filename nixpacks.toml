@@ -11,4 +11,4 @@ cmds = ["npm i -g corepack@latest && corepack enable && yarn install --frozen-lo
 cmds = ["cd apps/api-core && yarn run build"]
 
 [start]
-cmd = "node apps/api-core/dist/main.js"
+cmd = "node apps/api-core/dist/src/main.js"
