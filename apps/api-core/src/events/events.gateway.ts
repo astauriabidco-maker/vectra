@@ -20,9 +20,14 @@ export class EventsGateway implements OnGatewayInit, OnGatewayConnection, OnGate
     private redisSubscriber: Redis;
 
     constructor() {
+        const redisHost = process.env.REDIS_HOST || 'localhost';
+        const redisPort = parseInt(process.env.REDIS_PORT || '6399');
+        const redisPassword = process.env.REDIS_PASSWORD;
+
         this.redisSubscriber = new Redis({
-            host: 'localhost',
-            port: 6399,
+            host: redisHost,
+            port: redisPort,
+            password: redisPassword,
         });
     }
 

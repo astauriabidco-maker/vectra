@@ -6,17 +6,22 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     private client: Redis;
 
     onModuleInit() {
+        const redisHost = process.env.REDIS_HOST || 'localhost';
+        const redisPort = parseInt(process.env.REDIS_PORT || '6399');
+        const redisPassword = process.env.REDIS_PASSWORD;
+
         this.client = new Redis({
-            host: 'localhost',
-            port: 6399, // Mapped port from docker-compose
+            host: redisHost,
+            port: redisPort,
+            password: redisPassword,
         });
 
         this.client.on('connect', () => {
-            console.log('Connected to Redis on port 6399');
+            console.log(`✅ Connected to Redis at ${redisHost}:${redisPort}`);
         });
 
         this.client.on('error', (err) => {
-            console.error('Redis connection error:', err);
+            console.error('❌ Redis connection error:', err);
         });
     }
 
