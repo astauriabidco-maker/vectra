@@ -1,0 +1,104 @@
+version: '3.8'
+
+services:
+  # Base de données PostgreSQL
+  postgres:
+    image: postgres:15-alpine
+    container_name: wa_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - wa-network
+
+  # Message Broker (Redis)
+  redis:
+    image: redis:7-alpine
+    container_name: wa_redis
+    restart: always
+    ports:
+      - "6379:6379"
+    command: redis-server --save 60 1 --loglevel warning
+    networks:
+      - wa-network
+
+  # Service Webhook (Node.js)
+  webhook:
+    build: ./src/webhook
+    container_name: wa_webhook
+    ports:
+      - "3000:3000"
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - META_VERIFY_TOKEN=${META_VERIFY_TOKEN}
+    depends_on:
+      - redis
+    networks:
+      - wa-network
+    volumes:
+      - ./src/webhook:/app
+
+  # Service Worker (Node.js)
+  worker:
+    build: ./src/worker
+    container_name: wa_worker
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME}
+    depends_on:
+      - redis
+      - postgres
+    networks:
+      - wa-network
+    volumes:
+      - ./src/worker:/app
+
+  # Service API Core (Node.js)
+  api:
+    build: ./src/api
+    container_name: wa_api
+    ports:
+      - "4000:4000"
+    environment:
+      - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME}
+      - META_ACCESS_TOKEN=${META_ACCESS_TOKEN}
+      - META_PHONE_ID=${META_PHONE_ID}
+    depends_on:
+      - postgres
+    networks:
+      - wa-network
+    volumes:
+      - ./src/api:/app
+      - /app/node_modules
+
+  # Service Frontend (Next.js)
+  frontend:
+    build: ./src/frontend
+    container_name: wa_frontend
+    ports:
+      - "3001:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:4000
+    depends_on:
+      - api
+    networks:
+      - wa-network
+    volumes:
+      - ./src/frontend:/app
+      - /app/node_modules
+      - /app/.next
+
+networks:
+  wa-network:
+    driver: bridge
+
+volumes:
+  pgdata:

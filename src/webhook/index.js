@@ -1,0 +1,158 @@
+/**
+ * WhatsApp Hub - Webhook Service
+ * 
+ * ARCHITECTURE RULE (Antigravity):
+ * Ce service est STATELESS et doit répondre en < 1 seconde.
+ * - Reçoit les webhooks de Meta
+ * - Publie dans Redis (queue "inbound_events")
+ * - Renvoie 200 OK immédiatement
+ * 
+ * INTERDIT: Traiter les messages, accéder à la DB, ou faire des appels externes.
+ */
+
+const Fastify = require('fastify');
+const Redis = require('ioredis');
+
+// ============================================
+// CONFIGURATION
+// ============================================
+const PORT = parseInt(process.env.PORT || '3000', 10);
+const REDIS_HOST = process.env.REDIS_HOST || 'localhost';
+const REDIS_PORT = parseInt(process.env.REDIS_PORT || '6379', 10);
+const META_VERIFY_TOKEN = process.env.META_VERIFY_TOKEN || 'changeme';
+
+const QUEUE_NAME = 'inbound_events';
+
+// ============================================
+// REDIS CONNECTION
+// ============================================
+const redis = new Redis({
+    host: REDIS_HOST,
+    port: REDIS_PORT,
+    maxRetriesPerRequest: 3,
+});
+
+redis.on('connect', () => {
+    console.log(`[Webhook] ✅ Redis connected at ${REDIS_HOST}:${REDIS_PORT}`);
+});
+
+redis.on('error', (err) => {
+    console.error('[Webhook] ❌ Redis error:', err.message);
+});
+
+// ============================================
+// FASTIFY SERVER
+// ============================================
+const server = Fastify({
+    logger: true,
+});
+
+// ============================================
+// HEALTH CHECK
+// ============================================
+server.get('/health', async (request, reply) => {
+    return reply.send({
+        status: 'ok',
+        service: 'webhook',
+        redis: redis.status,
+        timestamp: new Date().toISOString(),
+    });
+});
+
+// ============================================
+// GET /webhook - Meta Verification
+// Meta appelle cette route pour vérifier le serveur
+// ============================================
+server.get('/webhook', async (request, reply) => {
+    const mode = request.query['hub.mode'];
+    const token = request.query['hub.verify_token'];
+    const challenge = request.query['hub.challenge'];
+
+    console.log('[Webhook] 🔐 Verification request received', { mode });
+
+    // Validate the verification request
+    if (mode === 'subscribe' && token === META_VERIFY_TOKEN) {
+        console.log('[Webhook] ✅ Verification successful');
+        // Meta exige que le challenge soit renvoyé en texte brut
+        return reply.status(200).send(challenge);
+    }
+
+    console.warn('[Webhook] ❌ Verification failed - invalid token');
+    return reply.status(403).send('Forbidden');
+});
+
+// ============================================
+// POST /webhook - Receive WhatsApp Messages
+// Reçoit les messages de WhatsApp Cloud API
+// CRITICAL: Répondre en < 1 seconde !
+// ============================================
+server.post('/webhook', async (request, reply) => {
+    const startTime = Date.now();
+    const body = request.body;
+
+    try {
+        // Validation rapide - vérifie que c'est bien WhatsApp
+        if (body?.object !== 'whatsapp_business_account') {
+            console.warn('[Webhook] ⚠️ Invalid object type:', body?.object);
+            return reply.status(400).send('Bad Request');
+        }
+
+        // Génère un ID unique pour traçabilité
+        const eventId = `evt_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+
+        // Crée l'événement à publier
+        const event = {
+            id: eventId,
+            receivedAt: new Date().toISOString(),
+            payload: body,
+        };
+
+        // ============================================
+        // ANTIGRAVITY: Push to Redis queue and return immediately
+        // Ne PAS traiter le message ici !
+        // ============================================
+        await redis.lpush(QUEUE_NAME, JSON.stringify(event));
+
+        const processingTime = Date.now() - startTime;
+        console.log(`[Webhook] 📨 Event queued in ${processingTime}ms`, { eventId });
+
+        // Toujours renvoyer 200 à Meta pour éviter les retries
+        return reply.status(200).send('EVENT_RECEIVED');
+
+    } catch (error) {
+        // Même en cas d'erreur, on renvoie 200 pour éviter les retries Meta
+        console.error('[Webhook] ❌ Error queuing event:', error);
+        return reply.status(200).send('EVENT_RECEIVED');
+    }
+});
+
+// ============================================
+// START SERVER
+// ============================================
+const start = async () => {
+    try {
+        await server.listen({ port: PORT, host: '0.0.0.0' });
+        console.log(`[Webhook] 🚀 Server running at http://0.0.0.0:${PORT}`);
+        console.log(`[Webhook] 📋 Queue: ${QUEUE_NAME}`);
+        console.log(`[Webhook] 🔑 Verify Token: ${META_VERIFY_TOKEN.substring(0, 3)}***`);
+    } catch (err) {
+        console.error('[Webhook] ❌ Failed to start:', err);
+        process.exit(1);
+    }
+};
+
+// ============================================
+// GRACEFUL SHUTDOWN
+// ============================================
+const shutdown = async () => {
+    console.log('[Webhook] 🛑 Shutting down...');
+    await server.close();
+    await redis.quit();
+    process.exit(0);
+};
+
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
+
+// Start the server
+start();
