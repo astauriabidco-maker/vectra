@@ -1,6 +1,8 @@
 'use client'
 
 import { useState, useEffect, useRef } from 'react'
+import { useRouter } from 'next/navigation'
+import { io, Socket } from 'socket.io-client'
 
 // ============================================
 // TYPES
@@ -22,6 +24,16 @@ interface Message {
     created_at: string
 }
 
+interface Template {
+    id: string
+    name: string
+    language: string
+    meta_status: string
+    body_text: string
+    variables_count: number
+    content?: object
+}
+
 // ============================================
 // API URL
 // ============================================
@@ -31,13 +43,53 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000'
 // MAIN COMPONENT
 // ============================================
 export default function InboxPage() {
+    const router = useRouter()
     const [conversations, setConversations] = useState<Conversation[]>([])
     const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null)
     const [messages, setMessages] = useState<Message[]>([])
     const [newMessage, setNewMessage] = useState('')
     const [loading, setLoading] = useState(false)
     const [sending, setSending] = useState(false)
+    const [canReply, setCanReply] = useState(true)
+    const [sessionExpiresAt, setSessionExpiresAt] = useState<string | null>(null)
+    const [templates, setTemplates] = useState<Template[]>([])
+    const [showTemplateSelector, setShowTemplateSelector] = useState(false)
+    const [selectedTemplate, setSelectedTemplate] = useState<Template | null>(null)
+    const [templateParams, setTemplateParams] = useState<string[]>([])
+
     const messagesEndRef = useRef<HTMLDivElement>(null)
+    const socketRef = useRef<Socket | null>(null)
+
+    // ============================================
+    // AUTH CHECK & API INTERCEPTOR
+    // ============================================
+    useEffect(() => {
+        const token = localStorage.getItem('token')
+        if (!token) {
+            router.push('/login')
+        }
+    }, [router])
+
+    const authFetch = async (url: string, options: RequestInit = {}) => {
+        const token = localStorage.getItem('token')
+        if (!token) {
+            router.push('/login')
+            throw new Error('Unauthorized')
+        }
+
+        return fetch(url, {
+            ...options,
+            headers: {
+                ...options.headers,
+                'Authorization': `Bearer ${token}`
+            }
+        })
+    }
+
+    const handleLogout = () => {
+        localStorage.removeItem('token')
+        router.push('/login')
+    }
 
     // ============================================
     // LOAD CONVERSATIONS
@@ -45,7 +97,7 @@ export default function InboxPage() {
     useEffect(() => {
         const fetchConversations = async () => {
             try {
-                const res = await fetch(`${API_URL}/conversations`)
+                const res = await authFetch(`${API_URL}/conversations`)
                 if (res.ok) {
                     const data = await res.json()
                     setConversations(data)
@@ -56,10 +108,64 @@ export default function InboxPage() {
         }
 
         fetchConversations()
-        // Refresh every 5 seconds
-        const interval = setInterval(fetchConversations, 5000)
+        // Refresh every 60 seconds as backup (WebSocket handles most updates)
+        const interval = setInterval(fetchConversations, 60000)
         return () => clearInterval(interval)
     }, [])
+
+    // ============================================
+    // SOCKET.IO CONNECTION
+    // ============================================
+    useEffect(() => {
+        // Connect to Socket.io server
+        const socket = io(API_URL, {
+            transports: ['websocket', 'polling'],
+            reconnection: true,
+            reconnectionAttempts: 5,
+            reconnectionDelay: 1000
+        })
+
+        socketRef.current = socket
+
+        socket.on('connect', () => {
+            console.log('🔌 Socket.io connected:', socket.id)
+        })
+
+        socket.on('disconnect', () => {
+            console.log('🔌 Socket.io disconnected')
+        })
+
+        socket.on('new_message', (message: Message & { conversation_id: string }) => {
+            console.log('📨 New message received:', message)
+
+            // Update messages if this is the current conversation
+            setMessages(prev => {
+                // Only add if it belongs to the selected conversation
+                // and not already in the list
+                if (message.conversation_id === selectedConversationId) {
+                    const exists = prev.some(m => m.id === message.id)
+                    if (!exists) {
+                        // Play notification sound
+                        try {
+                            new Audio('data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEA...').play().catch(() => { })
+                        } catch (e) { /* ignore */ }
+                        return [...prev, message]
+                    }
+                }
+                return prev
+            })
+
+            // Refresh conversations list to update last message time
+            authFetch(`${API_URL}/conversations`)
+                .then(res => res.ok ? res.json() : [])
+                .then(data => setConversations(data))
+                .catch(() => { })
+        })
+
+        return () => {
+            socket.disconnect()
+        }
+    }, [selectedConversationId])
 
     // ============================================
     // LOAD MESSAGES FOR SELECTED CONVERSATION
@@ -73,10 +179,19 @@ export default function InboxPage() {
         const fetchMessages = async () => {
             setLoading(true)
             try {
-                const res = await fetch(`${API_URL}/conversations/${selectedConversationId}/messages`)
+                const res = await authFetch(`${API_URL}/conversations/${selectedConversationId}/messages`)
                 if (res.ok) {
                     const data = await res.json()
-                    setMessages(data)
+                    // Handle new API response structure
+                    if (data.messages) {
+                        setMessages(data.messages)
+                        setCanReply(data.meta?.can_reply ?? true)
+                        setSessionExpiresAt(data.meta?.expires_at ?? null)
+                    } else {
+                        // Fallback for old API structure (array)
+                        setMessages(data)
+                        setCanReply(true)
+                    }
                 }
             } catch (err) {
                 console.error('Failed to fetch messages:', err)
@@ -86,9 +201,7 @@ export default function InboxPage() {
         }
 
         fetchMessages()
-        // Refresh messages every 3 seconds
-        const interval = setInterval(fetchMessages, 3000)
-        return () => clearInterval(interval)
+        // WebSocket handles real-time updates, no polling needed
     }, [selectedConversationId])
 
     // ============================================
@@ -106,7 +219,7 @@ export default function InboxPage() {
 
         setSending(true)
         try {
-            const res = await fetch(`${API_URL}/messages`, {
+            const res = await authFetch(`${API_URL}/messages`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -118,16 +231,91 @@ export default function InboxPage() {
             if (res.ok) {
                 setNewMessage('')
                 // Refresh messages
-                const msgRes = await fetch(`${API_URL}/conversations/${selectedConversationId}/messages`)
+                const msgRes = await authFetch(`${API_URL}/conversations/${selectedConversationId}/messages`)
                 if (msgRes.ok) {
                     const data = await msgRes.json()
-                    setMessages(data)
+                    if (data.messages) {
+                        setMessages(data.messages)
+                    } else {
+                        setMessages(data)
+                    }
                 }
             }
         } catch (err) {
             console.error('Failed to send message:', err)
         } finally {
             setSending(false)
+        }
+    }
+
+    // ============================================
+    // SEND TEMPLATE
+    // ============================================
+    const handleSendTemplate = async () => {
+        if (!selectedConversationId || sending || !selectedTemplate) return
+
+        setSending(true)
+        try {
+            const res = await authFetch(`${API_URL}/messages`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    conversation_id: selectedConversationId,
+                    type: 'template',
+                    template_name: selectedTemplate.name,
+                    template_language: selectedTemplate.language,
+                    params: templateParams.length > 0 ? templateParams : undefined,
+                }),
+            })
+
+            if (res.ok) {
+                setShowTemplateSelector(false)
+                setSelectedTemplate(null)
+                setTemplateParams([])
+                // Refresh messages
+                const msgRes = await authFetch(`${API_URL}/conversations/${selectedConversationId}/messages`)
+                if (msgRes.ok) {
+                    const data = await msgRes.json()
+                    if (data.messages) {
+                        setMessages(data.messages)
+                        setCanReply(data.meta?.can_reply ?? true)
+                    }
+                }
+            }
+        } catch (err) {
+            console.error('Failed to send template:', err)
+        } finally {
+            setSending(false)
+        }
+    }
+
+    // Select template and prepare variable inputs
+    const selectTemplate = (tpl: Template) => {
+        setSelectedTemplate(tpl)
+        // Initialize empty params array based on variables_count
+        setTemplateParams(new Array(tpl.variables_count).fill(''))
+    }
+
+    // Update a specific template parameter
+    const updateTemplateParam = (index: number, value: string) => {
+        const newParams = [...templateParams]
+        newParams[index] = value
+        setTemplateParams(newParams)
+    }
+
+    // ============================================
+    // FETCH TEMPLATES
+    // ============================================
+    const fetchTemplates = async () => {
+        try {
+            const res = await authFetch(`${API_URL}/templates`)
+            if (res.ok) {
+                const data = await res.json()
+                setTemplates(data)
+                setShowTemplateSelector(true)
+            }
+        } catch (err) {
+            console.error('Failed to fetch templates:', err)
         }
     }
 
@@ -166,6 +354,37 @@ export default function InboxPage() {
                         </svg>
                         WhatsApp Hub
                     </h1>
+                    <div className="flex items-center gap-3">
+                        <button
+                            onClick={() => router.push('/templates')}
+                            className="bg-white/20 hover:bg-white/30 text-white text-[10px] font-bold py-1.5 px-3 rounded-full transition-all uppercase tracking-wider"
+                        >
+                            Templates
+                        </button>
+                        <button
+                            onClick={() => router.push('/automations')}
+                            className="bg-white/20 hover:bg-white/30 text-white text-[10px] font-bold py-1.5 px-3 rounded-full transition-all uppercase tracking-wider"
+                        >
+                            Automatisations
+                        </button>
+                        {localStorage.getItem('role') === 'SUPER_ADMIN' && (
+                            <button
+                                onClick={() => router.push('/admin')}
+                                className="bg-white/20 hover:bg-white/30 text-white text-[10px] font-bold py-1.5 px-3 rounded-full transition-all uppercase tracking-wider"
+                            >
+                                Accès Admin
+                            </button>
+                        )}
+                        <button
+                            onClick={handleLogout}
+                            className="text-[#dcf8c6] hover:text-white transition-colors"
+                            title="Se déconnecter"
+                        >
+                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                            </svg>
+                        </button>
+                    </div>
                 </div>
 
                 {/* Conversations List */}
@@ -203,8 +422,8 @@ export default function InboxPage() {
                                                 {conv.wa_id}
                                             </span>
                                             <span className={`text-xs px-2 py-0.5 rounded-full ${conv.status === 'open'
-                                                    ? 'bg-green-100 text-green-700'
-                                                    : 'bg-gray-100 text-gray-600'
+                                                ? 'bg-green-100 text-green-700'
+                                                : 'bg-gray-100 text-gray-600'
                                                 }`}>
                                                 {conv.status}
                                             </span>
@@ -250,6 +469,14 @@ export default function InboxPage() {
                                     {conversations.find(c => c.id === selectedConversationId)?.wa_id}
                                 </p>
                             </div>
+                            <div className="ml-auto">
+                                <span className={`px-3 py-1 rounded-full text-xs font-medium ${canReply
+                                    ? 'bg-green-100 text-green-700'
+                                    : 'bg-red-100 text-red-700'
+                                    }`}>
+                                    {canReply ? 'Session Active' : 'Session Expirée'}
+                                </span>
+                            </div>
                         </div>
 
                         {/* Messages Area */}
@@ -259,57 +486,297 @@ export default function InboxPage() {
                             ) : messages.length === 0 ? (
                                 <div className="text-center text-gray-500">Aucun message</div>
                             ) : (
-                                messages.map((msg) => (
-                                    <div
-                                        key={msg.id}
-                                        className={`flex ${msg.direction === 'outbound' ? 'justify-end' : 'justify-start'}`}
-                                    >
+                                messages.map((msg) => {
+                                    // Parse media content if JSON
+                                    let mediaContent: { media_id?: string; caption?: string; mime_type?: string; filename?: string } | null = null;
+                                    const isMediaType = ['image', 'video', 'audio', 'voice', 'document', 'sticker'].includes(msg.type);
+
+                                    if (isMediaType && msg.body) {
+                                        try {
+                                            mediaContent = JSON.parse(msg.body);
+                                        } catch {
+                                            mediaContent = null;
+                                        }
+                                    }
+
+                                    return (
                                         <div
-                                            className={`max-w-[65%] px-3 py-2 rounded-lg shadow-sm ${msg.direction === 'outbound'
+                                            key={msg.id}
+                                            className={`flex ${msg.direction === 'outbound' ? 'justify-end' : 'justify-start'}`}
+                                        >
+                                            <div
+                                                className={`max-w-[65%] px-3 py-2 rounded-lg shadow-sm ${msg.direction === 'outbound'
                                                     ? 'bg-[#dcf8c6] rounded-br-none'
                                                     : 'bg-white rounded-bl-none'
-                                                }`}
-                                        >
-                                            <p className="text-sm whitespace-pre-wrap break-words">{msg.body}</p>
-                                            <div className="flex items-center justify-end gap-1 mt-1">
-                                                <span className="text-[10px] text-gray-500">
-                                                    {formatDate(msg.created_at)}
-                                                </span>
-                                                {msg.direction === 'outbound' && (
-                                                    <span className="text-[10px]">
-                                                        {msg.status === 'read' ? '✓✓' : msg.status === 'delivered' ? '✓✓' : '✓'}
-                                                    </span>
+                                                    }`}
+                                            >
+                                                {/* Image Message */}
+                                                {msg.type === 'image' && mediaContent?.media_id && (
+                                                    <div className="mb-2">
+                                                        <img
+                                                            src={`${API_URL}/media/${mediaContent.media_id}`}
+                                                            alt="Image"
+                                                            className="max-w-full rounded-lg cursor-pointer hover:opacity-90 transition-opacity"
+                                                            style={{ maxHeight: '300px' }}
+                                                            onClick={() => window.open(`${API_URL}/media/${mediaContent?.media_id}`, '_blank')}
+                                                            onError={(e) => {
+                                                                (e.target as HTMLImageElement).style.display = 'none';
+                                                                (e.target as HTMLImageElement).parentElement!.innerHTML = '<div class="text-gray-400 text-sm">📷 Image non disponible</div>';
+                                                            }}
+                                                        />
+                                                        {mediaContent.caption && (
+                                                            <p className="text-sm mt-1 whitespace-pre-wrap break-words">{mediaContent.caption}</p>
+                                                        )}
+                                                    </div>
                                                 )}
+
+                                                {/* Video Message */}
+                                                {msg.type === 'video' && mediaContent?.media_id && (
+                                                    <div className="mb-2">
+                                                        <video
+                                                            src={`${API_URL}/media/${mediaContent.media_id}`}
+                                                            controls
+                                                            className="max-w-full rounded-lg"
+                                                            style={{ maxHeight: '300px' }}
+                                                        />
+                                                        {mediaContent.caption && (
+                                                            <p className="text-sm mt-1 whitespace-pre-wrap break-words">{mediaContent.caption}</p>
+                                                        )}
+                                                    </div>
+                                                )}
+
+                                                {/* Audio/Voice Message */}
+                                                {(msg.type === 'audio' || msg.type === 'voice') && mediaContent?.media_id && (
+                                                    <div className="mb-2">
+                                                        <audio
+                                                            src={`${API_URL}/media/${mediaContent.media_id}`}
+                                                            controls
+                                                            className="max-w-full"
+                                                        />
+                                                    </div>
+                                                )}
+
+                                                {/* Document Message */}
+                                                {msg.type === 'document' && mediaContent?.media_id && (
+                                                    <div className="mb-2">
+                                                        <a
+                                                            href={`${API_URL}/media/${mediaContent.media_id}`}
+                                                            target="_blank"
+                                                            rel="noopener noreferrer"
+                                                            className="flex items-center gap-2 text-blue-600 hover:underline"
+                                                        >
+                                                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+                                                            </svg>
+                                                            <span className="text-sm">{mediaContent.filename || 'Document'}</span>
+                                                        </a>
+                                                        {mediaContent.caption && (
+                                                            <p className="text-sm mt-1 whitespace-pre-wrap break-words">{mediaContent.caption}</p>
+                                                        )}
+                                                    </div>
+                                                )}
+
+                                                {/* Sticker Message */}
+                                                {msg.type === 'sticker' && mediaContent?.media_id && (
+                                                    <div className="mb-2">
+                                                        <img
+                                                            src={`${API_URL}/media/${mediaContent.media_id}`}
+                                                            alt="Sticker"
+                                                            className="max-w-[150px] max-h-[150px]"
+                                                        />
+                                                    </div>
+                                                )}
+
+                                                {/* Text Message (or fallback) */}
+                                                {msg.type === 'text' && msg.body && (
+                                                    <p className="text-sm whitespace-pre-wrap break-words">{msg.body}</p>
+                                                )}
+
+                                                {/* Unsupported type fallback */}
+                                                {!isMediaType && msg.type !== 'text' && (
+                                                    <p className="text-sm text-gray-500 italic">[{msg.type}]</p>
+                                                )}
+
+                                                <div className="flex items-center justify-end gap-1 mt-1">
+                                                    <span className="text-[10px] text-gray-500">
+                                                        {formatDate(msg.created_at)}
+                                                    </span>
+                                                    {msg.direction === 'outbound' && (
+                                                        <span className="text-[10px]">
+                                                            {msg.status === 'read' ? '✓✓' : msg.status === 'delivered' ? '✓✓' : '✓'}
+                                                        </span>
+                                                    )}
+                                                </div>
                                             </div>
                                         </div>
-                                    </div>
-                                ))
+                                    );
+                                })
                             )}
                             <div ref={messagesEndRef} />
                         </div>
 
                         {/* Input Area */}
-                        <div className="bg-[#f0f0f0] px-4 py-3 flex items-center gap-3">
-                            <input
-                                type="text"
-                                value={newMessage}
-                                onChange={(e) => setNewMessage(e.target.value)}
-                                onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
-                                placeholder="Tapez un message..."
-                                className="flex-1 px-4 py-2 rounded-full border-none outline-none text-sm"
-                            />
-                            <button
-                                onClick={handleSendMessage}
-                                disabled={sending || !newMessage.trim()}
-                                className={`w-10 h-10 rounded-full flex items-center justify-center transition-colors ${sending || !newMessage.trim()
-                                        ? 'bg-gray-300 cursor-not-allowed'
-                                        : 'bg-[#128C7E] hover:bg-[#075E54] text-white'
-                                    }`}
-                            >
-                                <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
-                                    <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
-                                </svg>
-                            </button>
+                        <div className="bg-[#f0f0f0] px-4 py-3 flex flex-col gap-3">
+                            {!canReply && !showTemplateSelector && (
+                                <div className="bg-red-50 border border-red-100 p-4 rounded-lg flex flex-col gap-3">
+                                    <div className="text-xs text-red-600 flex items-center gap-2">
+                                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                        </svg>
+                                        La fenêtre de 24h est fermée. Le client doit répondre ou vous devez envoyer un Template.
+                                    </div>
+                                    <button
+                                        onClick={fetchTemplates}
+                                        className="bg-[#128C7E] hover:bg-[#075E54] text-white py-2 px-4 rounded-lg text-sm font-medium flex items-center justify-center gap-2 transition-colors"
+                                    >
+                                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                                        </svg>
+                                        Relancer la conversation (Template)
+                                    </button>
+                                </div>
+                            )}
+
+                            {showTemplateSelector && (
+                                <div className="bg-white border border-gray-200 p-4 rounded-lg shadow-sm animate-in fade-in slide-in-from-bottom-2 duration-200">
+                                    <div className="flex justify-between items-center mb-3">
+                                        <h3 className="font-semibold text-sm">
+                                            {selectedTemplate ? `Template: ${selectedTemplate.name}` : 'Sélectionner un Template'}
+                                        </h3>
+                                        <button
+                                            onClick={() => {
+                                                setShowTemplateSelector(false)
+                                                setSelectedTemplate(null)
+                                                setTemplateParams([])
+                                            }}
+                                            className="text-gray-400 hover:text-gray-600"
+                                        >
+                                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                            </svg>
+                                        </button>
+                                    </div>
+
+                                    {/* Template Selection List */}
+                                    {!selectedTemplate && (
+                                        <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+                                            {templates.length === 0 ? (
+                                                <p className="text-xs text-gray-500 text-center py-2">Aucun template disponible</p>
+                                            ) : (
+                                                templates.filter(t => t.meta_status === 'APPROVED').map(tpl => (
+                                                    <div
+                                                        key={tpl.id}
+                                                        onClick={() => selectTemplate(tpl)}
+                                                        className="border border-gray-100 p-3 rounded-lg hover:bg-green-50 hover:border-green-200 cursor-pointer transition-all group"
+                                                    >
+                                                        <div className="flex justify-between items-center group-hover:text-green-700">
+                                                            <span className="text-sm font-medium">{tpl.name}</span>
+                                                            <div className="flex items-center gap-2">
+                                                                {tpl.variables_count > 0 && (
+                                                                    <span className="text-[10px] bg-blue-100 text-blue-600 px-1.5 py-0.5 rounded">
+                                                                        {tpl.variables_count} var
+                                                                    </span>
+                                                                )}
+                                                                <span className="text-[10px] bg-gray-100 px-1.5 py-0.5 rounded text-gray-500">{tpl.language}</span>
+                                                            </div>
+                                                        </div>
+                                                        <p className="text-xs text-gray-500 mt-1 line-clamp-2">{tpl.body_text || 'No preview'}</p>
+                                                    </div>
+                                                ))
+                                            )}
+                                        </div>
+                                    )}
+
+                                    {/* Template Variables Form */}
+                                    {selectedTemplate && (
+                                        <div className="space-y-3">
+                                            {/* Template Preview */}
+                                            <div className="bg-gray-50 p-3 rounded-lg text-sm text-gray-600 border border-gray-100">
+                                                {selectedTemplate.body_text || 'Template content'}
+                                            </div>
+
+                                            {/* Variable Inputs */}
+                                            {selectedTemplate.variables_count > 0 && (
+                                                <div className="space-y-2">
+                                                    <p className="text-xs text-gray-500 font-medium">Variables à compléter:</p>
+                                                    {Array.from({ length: selectedTemplate.variables_count }).map((_, idx) => (
+                                                        <div key={idx} className="flex items-center gap-2">
+                                                            <label className="text-xs text-gray-500 w-20">
+                                                                {`{{${idx + 1}}}`}
+                                                            </label>
+                                                            <input
+                                                                type="text"
+                                                                value={templateParams[idx] || ''}
+                                                                onChange={(e) => updateTemplateParam(idx, e.target.value)}
+                                                                placeholder={`Variable ${idx + 1}`}
+                                                                className="flex-1 px-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-200 focus:border-green-300"
+                                                            />
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            )}
+
+                                            {/* Action Buttons */}
+                                            <div className="flex gap-2 pt-2">
+                                                <button
+                                                    onClick={() => {
+                                                        setSelectedTemplate(null)
+                                                        setTemplateParams([])
+                                                    }}
+                                                    className="flex-1 py-2 text-sm text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50"
+                                                >
+                                                    Retour
+                                                </button>
+                                                <button
+                                                    onClick={handleSendTemplate}
+                                                    disabled={sending || (selectedTemplate.variables_count > 0 && templateParams.some(p => !p.trim()))}
+                                                    className={`flex-1 py-2 text-sm text-white rounded-lg font-medium transition-all ${sending || (selectedTemplate.variables_count > 0 && templateParams.some(p => !p.trim()))
+                                                        ? 'bg-gray-300 cursor-not-allowed'
+                                                        : 'bg-[#128C7E] hover:bg-[#075E54]'
+                                                        }`}
+                                                >
+                                                    {sending ? 'Envoi...' : 'Envoyer'}
+                                                </button>
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
+                            {canReply && !showTemplateSelector && (
+                                <div className="flex items-center gap-2">
+                                    {/* Template Button */}
+                                    <button
+                                        onClick={fetchTemplates}
+                                        title="Envoyer un template"
+                                        className="w-10 h-10 rounded-full flex items-center justify-center bg-white hover:bg-gray-100 text-gray-600 transition-all shadow-sm"
+                                    >
+                                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                                        </svg>
+                                    </button>
+                                    <input
+                                        type="text"
+                                        value={newMessage}
+                                        onChange={(e) => setNewMessage(e.target.value)}
+                                        onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
+                                        placeholder="Tapez un message..."
+                                        className="flex-1 px-4 py-2 rounded-full border-none outline-none text-sm shadow-sm"
+                                    />
+                                    <button
+                                        onClick={handleSendMessage}
+                                        disabled={sending || !newMessage.trim()}
+                                        className={`w-10 h-10 rounded-full flex items-center justify-center transition-all shadow-sm ${sending || !newMessage.trim()
+                                            ? 'bg-gray-300 cursor-not-allowed'
+                                            : 'bg-[#128C7E] hover:bg-[#075E54] text-white active:scale-95'
+                                            }`}
+                                    >
+                                        <svg className="w-5 h-5 ml-0.5" fill="currentColor" viewBox="0 0 24 24">
+                                            <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
+                                        </svg>
+                                    </button>
+                                </div>
+                            )}
                         </div>
                     </>
                 )}

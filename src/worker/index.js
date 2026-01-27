@@ -13,6 +13,7 @@
 
 const { Pool } = require('pg');
 const Redis = require('ioredis');
+const axios = require('axios');
 
 // ============================================
 // CONFIGURATION
@@ -22,6 +23,11 @@ const REDIS_PORT = parseInt(process.env.REDIS_PORT || '6379', 10);
 const DATABASE_URL = process.env.DATABASE_URL || 'postgresql://admin:secret_dev@localhost:5432/whatsapp_hub';
 
 const QUEUE_NAME = 'inbound_events';
+
+// WhatsApp Cloud API Config
+const META_API_URL = 'https://graph.facebook.com/v18.0';
+const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
+const META_PHONE_ID = process.env.META_PHONE_ID;
 
 // Default tenant ID (will be loaded at startup)
 let DEFAULT_TENANT_ID = null;
@@ -45,7 +51,7 @@ pool.on('error', (err) => {
 });
 
 // ============================================
-// REDIS CONNECTION
+// REDIS CONNECTION (Queue consumer)
 // ============================================
 const redis = new Redis({
     host: REDIS_HOST,
@@ -59,6 +65,18 @@ redis.on('connect', () => {
 
 redis.on('error', (err) => {
     console.error('[Worker] ❌ Redis error:', err.message);
+});
+
+// ============================================
+// REDIS PUBLISHER (for real-time events)
+// ============================================
+const redisPublisher = new Redis({
+    host: REDIS_HOST,
+    port: REDIS_PORT,
+});
+
+redisPublisher.on('connect', () => {
+    console.log('[Worker] ✅ Redis Publisher connected');
 });
 
 // ============================================
@@ -142,25 +160,197 @@ async function findOrCreateConversation(client, contactId) {
 // INSERT MESSAGE
 // ============================================
 async function insertMessage(client, conversationId, messageData, fullPayload) {
+    // Handle different message types
+    let messageBody = null;
+    let mediaId = null;
+    let mediaCaption = null;
+
+    switch (messageData.type) {
+        case 'text':
+            messageBody = messageData.text?.body || null;
+            break;
+        case 'image':
+            mediaId = messageData.image?.id || null;
+            mediaCaption = messageData.image?.caption || null;
+            // Store as JSON for frontend parsing
+            messageBody = JSON.stringify({
+                media_id: mediaId,
+                caption: mediaCaption,
+                mime_type: messageData.image?.mime_type || 'image/jpeg'
+            });
+            console.log(`[Worker] 📷 Image message: ${mediaId}`);
+            break;
+        case 'video':
+            mediaId = messageData.video?.id || null;
+            mediaCaption = messageData.video?.caption || null;
+            messageBody = JSON.stringify({
+                media_id: mediaId,
+                caption: mediaCaption,
+                mime_type: messageData.video?.mime_type || 'video/mp4'
+            });
+            console.log(`[Worker] 🎥 Video message: ${mediaId}`);
+            break;
+        case 'audio':
+        case 'voice':
+            mediaId = messageData.audio?.id || messageData.voice?.id || null;
+            messageBody = JSON.stringify({
+                media_id: mediaId,
+                mime_type: messageData.audio?.mime_type || messageData.voice?.mime_type || 'audio/ogg'
+            });
+            console.log(`[Worker] 🎵 Audio message: ${mediaId}`);
+            break;
+        case 'document':
+            mediaId = messageData.document?.id || null;
+            messageBody = JSON.stringify({
+                media_id: mediaId,
+                caption: messageData.document?.caption || null,
+                filename: messageData.document?.filename || 'document',
+                mime_type: messageData.document?.mime_type || 'application/octet-stream'
+            });
+            console.log(`[Worker] 📄 Document message: ${mediaId}`);
+            break;
+        case 'sticker':
+            mediaId = messageData.sticker?.id || null;
+            messageBody = JSON.stringify({
+                media_id: mediaId,
+                mime_type: messageData.sticker?.mime_type || 'image/webp'
+            });
+            console.log(`[Worker] 🎭 Sticker message: ${mediaId}`);
+            break;
+        default:
+            messageBody = `[${messageData.type} message]`;
+    }
+
     const result = await client.query(
         `INSERT INTO messages 
      (tenant_id, conversation_id, direction, type, body, wa_message_id, status, payload) 
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8) 
-     RETURNING id`,
+     RETURNING id, created_at`,
         [
             DEFAULT_TENANT_ID,
             conversationId,
             'inbound',
             messageData.type || 'text',
-            messageData.text?.body || null,
+            messageBody,
             messageData.id,
             'delivered',
             JSON.stringify(fullPayload),
         ]
     );
 
-    console.log(`[Worker] 📩 Message inserted: ${result.rows[0].id}`);
-    return result.rows[0].id;
+    const insertedMessage = result.rows[0];
+    console.log(`[Worker] 📩 Message inserted: ${insertedMessage.id}`);
+
+    // 🔴 REAL-TIME: Publish to Redis for Socket.io
+    const realtimePayload = {
+        id: insertedMessage.id,
+        conversation_id: conversationId,
+        direction: 'inbound',
+        type: messageData.type || 'text',
+        body: messageBody,
+        status: 'delivered',
+        created_at: insertedMessage.created_at,
+        tenant_id: DEFAULT_TENANT_ID
+    };
+    await redisPublisher.publish('chat_events', JSON.stringify(realtimePayload));
+    console.log('[Worker] 📡 Published to chat_events');
+
+    return insertedMessage.id;
+}
+
+// ============================================
+// CHECK AUTOMATION RULES
+// ============================================
+async function checkAutomationRules(tenantId, messageBody) {
+    if (!messageBody) return null;
+
+    try {
+        const result = await pool.query(
+            `SELECT id, response_text FROM automation_rules 
+             WHERE tenant_id = $1 AND is_active = true 
+             AND LOWER($2) LIKE '%' || LOWER(trigger_keyword) || '%'
+             LIMIT 1`,
+            [tenantId, messageBody]
+        );
+
+        if (result.rows.length > 0) {
+            console.log(`[Worker] 🤖 Automation rule matched: ${result.rows[0].id}`);
+            return result.rows[0];
+        }
+    } catch (err) {
+        console.error('[Worker] ❌ Automation check failed:', err.message);
+    }
+
+    return null;
+}
+
+// ============================================
+// SEND WHATSAPP MESSAGE
+// ============================================
+async function sendWhatsAppMessage(toWaId, text) {
+    if (!META_ACCESS_TOKEN || !META_PHONE_ID) {
+        console.error('[Worker] ❌ Missing META_ACCESS_TOKEN or META_PHONE_ID');
+        return null;
+    }
+
+    try {
+        const response = await axios.post(
+            `${META_API_URL}/${META_PHONE_ID}/messages`,
+            {
+                messaging_product: 'whatsapp',
+                recipient_type: 'individual',
+                to: toWaId,
+                type: 'text',
+                text: { body: text }
+            },
+            {
+                headers: {
+                    'Authorization': `Bearer ${META_ACCESS_TOKEN}`,
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
+
+        console.log(`[Worker] ✅ WhatsApp message sent to ${toWaId}`);
+        return response.data?.messages?.[0]?.id || null;
+    } catch (err) {
+        console.error('[Worker] ❌ Failed to send WhatsApp message:', err.response?.data || err.message);
+        return null;
+    }
+}
+
+// ============================================
+// INSERT AUTOMATED MESSAGE
+// ============================================
+async function insertAutomatedMessage(conversationId, body, waMessageId) {
+    try {
+        const result = await pool.query(
+            `INSERT INTO messages 
+             (tenant_id, conversation_id, direction, type, body, wa_message_id, status, is_automated) 
+             VALUES ($1, $2, 'outbound', 'text', $3, $4, 'sent', true)
+             RETURNING id, created_at`,
+            [DEFAULT_TENANT_ID, conversationId, body, waMessageId]
+        );
+        console.log('[Worker] 📤 Automated message saved to DB');
+
+        // 🔴 REAL-TIME: Publish to Redis for Socket.io
+        const insertedMessage = result.rows[0];
+        const realtimePayload = {
+            id: insertedMessage.id,
+            conversation_id: conversationId,
+            direction: 'outbound',
+            type: 'text',
+            body: body,
+            status: 'sent',
+            created_at: insertedMessage.created_at,
+            tenant_id: DEFAULT_TENANT_ID,
+            is_automated: true
+        };
+        await redisPublisher.publish('chat_events', JSON.stringify(realtimePayload));
+        console.log('[Worker] 📡 Published automated message to chat_events');
+    } catch (err) {
+        console.error('[Worker] ❌ Failed to save automated message:', err.message);
+    }
 }
 
 // ============================================
@@ -216,6 +406,20 @@ async function processEvent(eventData) {
 
             const processingTime = Date.now() - startTime;
             console.log(`[Worker] ✅ Event processed in ${processingTime}ms: ${event.id}`);
+
+            // ============================================
+            // STEP D: CHECK AUTOMATION RULES (after commit)
+            // ============================================
+            const messageBody = message.text?.body;
+            const automationRule = await checkAutomationRules(DEFAULT_TENANT_ID, messageBody);
+
+            if (automationRule) {
+                console.log(`[Worker] 🤖 Triggering automated reply...`);
+                const waMessageId = await sendWhatsAppMessage(waId, automationRule.response_text);
+                if (waMessageId) {
+                    await insertAutomatedMessage(conversationId, automationRule.response_text, waMessageId);
+                }
+            }
 
         } catch (dbError) {
             await client.query('ROLLBACK');
