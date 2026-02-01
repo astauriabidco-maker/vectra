@@ -8,13 +8,24 @@
     },
     "dependencies": {
         "@fastify/cors": "^8.5.0",
-        "axios": "^1.6.2",
+        "@fastify/multipart": "^8.3.0",
+        "@fastify/static": "^7.0.0",
+        "@google/generative-ai": "^0.21.0",
+        "axios": "^1.13.4",
         "bcryptjs": "^3.0.3",
+        "cheerio": "^1.2.0",
+        "csv-parser": "^3.2.0",
         "dotenv": "^16.3.1",
         "fastify": "^4.25.0",
+        "form-data": "^4.0.5",
+        "he": "^1.2.0",
         "ioredis": "^5.3.2",
         "jsonwebtoken": "^9.0.3",
+        "openai": "^4.0.0",
         "pg": "^8.11.3",
-        "socket.io": "^4.7.2"
+        "qrcode": "^1.5.4",
+        "sharp": "^0.34.5",
+        "socket.io": "^4.7.2",
+        "youtube-transcript": "^1.2.1"
     }
 }

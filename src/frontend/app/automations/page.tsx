@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { useRouter } from 'next/navigation'
+import DashboardLayout from '@/components/Layout/DashboardLayout'
 
 interface AutomationRule {
     id: string
@@ -12,7 +12,6 @@ interface AutomationRule {
 }
 
 export default function AutomationsPage() {
-    const router = useRouter()
     const [rules, setRules] = useState<AutomationRule[]>([])
     const [loading, setLoading] = useState(true)
     const [triggerKeyword, setTriggerKeyword] = useState('')
@@ -23,13 +22,8 @@ export default function AutomationsPage() {
     const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000'
 
     useEffect(() => {
-        const token = localStorage.getItem('token')
-        if (!token) {
-            router.push('/login')
-            return
-        }
         fetchRules()
-    }, [router])
+    }, [])
 
     const authFetch = async (url: string, options: RequestInit = {}) => {
         const token = localStorage.getItem('token')
@@ -107,35 +101,17 @@ export default function AutomationsPage() {
     }
 
     return (
-        <div className="min-h-screen bg-gray-50 flex flex-col">
-            {/* Header */}
-            <header className="bg-gradient-to-r from-[#075E54] to-[#128C7E] px-6 py-4 flex justify-between items-center shadow-lg">
-                <div className="flex items-center gap-3">
-                    <div className="bg-white/20 p-2 rounded-lg">
-                        <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
-                        </svg>
-                    </div>
-                    <div>
-                        <h1 className="text-white text-xl font-bold">Automatisations</h1>
-                        <p className="text-white/70 text-xs">Réponses automatiques par mots-clés</p>
-                    </div>
+        <DashboardLayout>
+            <div className="space-y-6">
+                {/* Page Header */}
+                <div>
+                    <h1 className="text-2xl font-bold text-gray-900">🤖 Automatisations</h1>
+                    <p className="text-gray-500 mt-1">Créez des réponses automatiques basées sur des mots-clés</p>
                 </div>
-                <button
-                    onClick={() => router.push('/')}
-                    className="flex items-center gap-2 px-4 py-2 text-sm font-semibold text-white/80 hover:text-white transition-colors"
-                >
-                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
-                    </svg>
-                    Retour
-                </button>
-            </header>
 
-            <main className="flex-1 p-6 max-w-4xl mx-auto w-full space-y-6">
                 {/* Status Bar */}
                 {status.message && (
-                    <div className={`p-4 rounded-lg flex items-center gap-3 animate-in slide-in-from-top-4 duration-300 ${status.type === 'success' ? 'bg-green-50 text-green-700 border border-green-200' :
+                    <div className={`p-4 rounded-lg flex items-center gap-3 ${status.type === 'success' ? 'bg-green-50 text-green-700 border border-green-200' :
                             status.type === 'error' ? 'bg-red-50 text-red-700 border border-red-200' :
                                 'bg-blue-50 text-blue-700 border border-blue-200'
                         }`}>
@@ -249,7 +225,7 @@ export default function AutomationsPage() {
                         </table>
                     </div>
                 </div>
-            </main>
-        </div>
+            </div>
+        </DashboardLayout>
     )
 }
